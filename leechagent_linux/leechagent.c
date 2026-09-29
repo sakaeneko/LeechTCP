@@ -7,6 +7,7 @@
 #include "leechagent_rpc.h"
 #include "leechagent_proc.h"
 #include "leechrpc.h"
+VOID *LeechRpc_TcpServerThread(VOID *pv);
 #include <stdio.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -283,6 +284,14 @@ VOID LeechSvc_RunSvc(_In_ PLEECHSVC_CONFIG pConfig)
         RpcStop();
         LeechRpcOnUnloadClose();
         return;
+    }
+    {
+        pthread_t tcpTid;
+        if(pthread_create(&tcpTid, NULL, LeechRpc_TcpServerThread, NULL) == 0) {
+            pthread_detach(tcpTid);
+        } else {
+            printf("Failed to start TCP server thread.\n");
+        }
     }
     // Check whether to stop the service.
     while(TRUE) {
