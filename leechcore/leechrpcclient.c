@@ -11,6 +11,12 @@
 #include "oscompatibility.h"
 #include <leechgrpc.h>
 
+_Success_(return)
+BOOL LeechRPC_TcpSubmitCommand(
+    _In_ PLC_CONTEXT ctxLC,
+    _In_ PBYTE pbIn, _In_ DWORD cbIn,
+    _Out_ PBYTE *ppbOut, _Out_ DWORD *pcbOut);
+
 #ifdef _WIN32
 
 #include <rpc.h>
@@ -91,6 +97,13 @@ BOOL LeechRPC_SubmitCommand(_In_ PLC_CONTEXT ctxLC, _In_ PLEECHRPC_MSG_HDR pMsgI
             return FALSE;
         }
         cbMsgOut = (DWORD)cbMsgOutSize;
+    }
+    else if(ctx->fIsProtoTcp) {
+        fOK = LeechRPC_TcpSubmitCommand(ctxLC, (PBYTE)pMsgIn, pMsgIn->cbMsg, (PBYTE*)ppMsgOut, &cbMsgOut);
+        if(!fOK) {
+            *ppMsgOut = NULL;
+            return FALSE;
+        }
     }
     // sanity check non-trusted incoming message from RPC server.
     fOK = (cbMsgOut >= sizeof(LEECHRPC_MSG_HDR)) && *ppMsgOut && ((*ppMsgOut)->dwMagic == LEECHRPC_MSGMAGIC);
@@ -179,6 +192,11 @@ VOID LeechRPC_KeepaliveThreadClient(_In_ PLC_CONTEXT ctxLC)
 
 VOID LeechRPC_RpcClose(PLEECHRPC_CLIENT_CONTEXT ctx)
 {
+    // Close TCP connection:
+    if(ctx->hTcpSocket != INVALID_SOCKET && ctx->hTcpSocket != 0) {
+        closesocket(ctx->hTcpSocket);
+        ctx->hTcpSocket = INVALID_SOCKET;
+    }
     // Close the gRPC connection:
     if(ctx->grpc.hGRPC) {
         ctx->grpc.pfn_leechgrpc_client_free(ctx->grpc.hGRPC);
@@ -454,7 +472,93 @@ BOOL LeechRPC_GRpcInitialize(_In_ PLC_CONTEXT ctxLC, _In_ PLEECHRPC_CLIENT_CONTE
     return TRUE;
 }
 
+// ============ TCP TRANSPORT LAYER ============
 
+static BOOL LeechRPC_TcpRecvAll(SOCKET s, PVOID buf, DWORD len)
+{
+    DWORD recvd = 0;
+    while(recvd < len) {
+        int r = recv(s, (char*)buf + recvd, (int)(len - recvd), 0);
+        if(r <= 0) return FALSE;
+        recvd += (DWORD)r;
+    }
+    return TRUE;
+}
+
+static BOOL LeechRPC_TcpSendAll(SOCKET s, PVOID buf, DWORD len)
+{
+    DWORD sent = 0;
+    while(sent < len) {
+        int r = send(s, (char*)buf + sent, (int)(len - sent), 0);
+        if(r <= 0) return FALSE;
+        sent += (DWORD)r;
+    }
+    return TRUE;
+}
+
+_Success_(return)
+BOOL LeechRPC_TcpInitialize(_In_ PLC_CONTEXT ctxLC, _In_ PLEECHRPC_CLIENT_CONTEXT ctx)
+{
+    WSADATA wsa;
+    struct sockaddr_in addr;
+    SOCKET s;
+    int flag = 1;
+    int bufsize = 8 * 1024 * 1024;
+
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+
+    s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if(s == INVALID_SOCKET) return FALSE;
+
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((u_short)strtol(ctx->szTcpPort, NULL, 10));
+    if(inet_pton(AF_INET, ctx->szTcpAddr, &addr.sin_addr) != 1) {
+        closesocket(s);
+        return FALSE;
+    }
+
+    if(connect(s, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        closesocket(s);
+        return FALSE;
+    }
+
+    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+    setsockopt(s, SOL_SOCKET, SO_RCVBUF, (char*)&bufsize, sizeof(bufsize));
+    setsockopt(s, SOL_SOCKET, SO_SNDBUF, (char*)&bufsize, sizeof(bufsize));
+
+    ctx->hTcpSocket = s;
+    return TRUE;
+}
+
+_Success_(return)
+BOOL LeechRPC_TcpSubmitCommand(
+    _In_ PLC_CONTEXT ctxLC,
+    _In_ PBYTE pbIn, _In_ DWORD cbIn,
+    _Out_ PBYTE *ppbOut, _Out_ DWORD *pcbOut)
+{
+    PLEECHRPC_CLIENT_CONTEXT ctx = (PLEECHRPC_CLIENT_CONTEXT)ctxLC->hDevice;
+    DWORD cbRsp = 0;
+
+    if(ctx->hTcpSocket == INVALID_SOCKET) return FALSE;
+
+    if(!LeechRPC_TcpSendAll(ctx->hTcpSocket, &cbIn, sizeof(cbIn))) return FALSE;
+    if(!LeechRPC_TcpSendAll(ctx->hTcpSocket, pbIn, cbIn)) return FALSE;
+
+    if(!LeechRPC_TcpRecvAll(ctx->hTcpSocket, &cbRsp, sizeof(cbRsp))) return FALSE;
+    if(cbRsp == 0 || cbRsp > 0x10000000) return FALSE;
+
+    *ppbOut = (PBYTE)LocalAlloc(0, cbRsp);
+    if(!*ppbOut) return FALSE;
+    if(!LeechRPC_TcpRecvAll(ctx->hTcpSocket, *ppbOut, cbRsp)) {
+        LocalFree(*ppbOut);
+        *ppbOut = NULL;
+        return FALSE;
+    }
+
+    *pcbOut = cbRsp;
+    return TRUE;
+}
+// ============ TCP TRANSPORT LAYER END ============
 
 //-----------------------------------------------------------------------------
 // GENERAL FUNCTIONALITY BELOW:
@@ -762,7 +866,8 @@ BOOL LeechRpc_Open(_Inout_ PLC_CONTEXT ctxLC, _Out_opt_ PPLC_CONFIG_ERRORINFO pp
     if(!_stricmp(ctxLC->Config.szDeviceName, "grpc")) { ctx->fIsProtoGRpc = TRUE; }
     if(!_stricmp(ctxLC->Config.szDeviceName, "rpc")) { ctx->fIsProtoRpc = TRUE; }
     if(!_stricmp(ctxLC->Config.szDeviceName, "smb")) { ctx->fIsProtoSmb = TRUE; }
-    if(!ctx->fIsProtoGRpc && !ctx->fIsProtoRpc && !ctx->fIsProtoSmb) {
+    if(!_stricmp(ctxLC->Config.szDeviceName, "tcp")) { ctx->fIsProtoTcp = TRUE; }
+    if(!ctx->fIsProtoGRpc && !ctx->fIsProtoRpc && !ctx->fIsProtoSmb && !ctx->fIsProtoTcp) {
         lcprintf(ctxLC, "REMOTE: ERROR: No valid remote transport protocol specified.\n");
         goto fail;
     }
@@ -874,6 +979,31 @@ BOOL LeechRpc_Open(_Inout_ PLC_CONTEXT ctxLC, _Out_opt_ PPLC_CONFIG_ERRORINFO pp
         }
         if(!LeechRPC_Ping(ctxLC)) {
             lcprintf(ctxLC, "REMOTE: ERROR: Unable to ping remote gRPC service '%s'\n", ctxLC->Config.szRemote);
+            goto fail;
+        }
+    }
+        if(ctx->fIsProtoTcp) {
+        ctxLC->Rpc.fCompress = FALSE;
+        Util_Split3(ctxLC->Config.szRemote + 6, ':', _szBufferArg, &szArg1, &szArg2, &szArg3);
+        if(!szArg2 || !szArg2[0]) { goto fail; }
+        strncpy_s(ctx->szTcpAddr, _countof(ctx->szTcpAddr), szArg2, MAX_PATH);
+        if(szArg3[0]) {
+            Util_SplitN(szArg3, ',', 6, _szBufferOpt, aszOpt);
+            for(i = 0; i < 6; i++) {
+                if(0 == _strnicmp("port=", aszOpt[i], 5)) {
+                    dwPort = atoi(aszOpt[i] + 5);
+                }
+            }
+        }
+        if(dwPort == 0) dwPort = 28475;
+        _itoa_s(dwPort, ctx->szTcpPort, 6, 10);
+        ctx->hTcpSocket = INVALID_SOCKET;
+        if(!LeechRPC_TcpInitialize(ctxLC, ctx)) {
+            lcprintf(ctxLC, "REMOTE: ERROR: Unable to connect TCP service\n");
+            goto fail;
+        }
+        if(!LeechRPC_Ping(ctxLC)) {
+            lcprintf(ctxLC, "REMOTE: ERROR: Unable to ping TCP service\n");
             goto fail;
         }
     }
