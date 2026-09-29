@@ -21,6 +21,8 @@ BOOL LeechRPC_TcpSubmitCommand(
     _In_ PLC_CONTEXT ctxLC,
     _In_ PBYTE pbIn, _In_ DWORD cbIn,
     _Out_ PBYTE *ppbOut, _Out_ DWORD *pcbOut);
+static CRITICAL_SECTION g_TcpLock;
+static BOOL g_TcpLockInit = FALSE;
 
 #ifdef _WIN32
 
@@ -511,6 +513,10 @@ BOOL LeechRPC_TcpInitialize(_In_ PLC_CONTEXT ctxLC, _In_ PLEECHRPC_CLIENT_CONTEX
     int bufsize = 8 * 1024 * 1024;
 
     WSAStartup(MAKEWORD(2, 2), &wsa);
+    if(!g_TcpLockInit) {
+        InitializeCriticalSection(&g_TcpLock);
+        g_TcpLockInit = TRUE;
+    }
 
     s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if(s == INVALID_SOCKET) return FALSE;
@@ -543,52 +549,44 @@ BOOL LeechRPC_TcpSubmitCommand(
 {
     PLEECHRPC_CLIENT_CONTEXT ctx = (PLEECHRPC_CLIENT_CONTEXT)ctxLC->hDevice;
     DWORD cbRsp = 0;
+    BOOL fResult = FALSE;
 
     if(ctx->hTcpSocket == INVALID_SOCKET) {
-        lcprintf(ctxLC, "TCP: invalid socket\n");
         return FALSE;
     }
 
-    lcprintf(ctxLC, "TCP submit: cbIn=%u\n", cbIn);
+    EnterCriticalSection(&g_TcpLock);
 
     if(!LeechRPC_TcpSendAll(ctx->hTcpSocket, &cbIn, sizeof(cbIn))) {
-        lcprintf(ctxLC, "TCP: SendAll(cbIn) FAILED\n");
-        return FALSE;
+        goto cleanup;
     }
     if(!LeechRPC_TcpSendAll(ctx->hTcpSocket, pbIn, cbIn)) {
-        lcprintf(ctxLC, "TCP: SendAll(pbIn) FAILED\n");
-        return FALSE;
+        goto cleanup;
     }
-
-    lcprintf(ctxLC, "TCP: sent, waiting for cbRsp...\n");
 
     if(!LeechRPC_TcpRecvAll(ctx->hTcpSocket, &cbRsp, sizeof(cbRsp))) {
-        lcprintf(ctxLC, "TCP: RecvAll(cbRsp) FAILED\n");
-        return FALSE;
+        goto cleanup;
     }
-
-    lcprintf(ctxLC, "TCP: got cbRsp=%u\n", cbRsp);
-
     if(cbRsp == 0 || cbRsp > 0x10000000) {
-        lcprintf(ctxLC, "TCP: cbRsp invalid: %u\n", cbRsp);
-        return FALSE;
+        goto cleanup;
     }
 
     *ppbOut = (PBYTE)LocalAlloc(0, cbRsp);
     if(!*ppbOut) {
-        lcprintf(ctxLC, "TCP: LocalAlloc failed\n");
-        return FALSE;
+        goto cleanup;
     }
     if(!LeechRPC_TcpRecvAll(ctx->hTcpSocket, *ppbOut, cbRsp)) {
-        lcprintf(ctxLC, "TCP: RecvAll(data) FAILED\n");
         LocalFree(*ppbOut);
         *ppbOut = NULL;
-        return FALSE;
+        goto cleanup;
     }
 
-    lcprintf(ctxLC, "TCP: done cbRsp=%u\n", cbRsp);
     *pcbOut = cbRsp;
-    return TRUE;
+    fResult = TRUE;
+
+cleanup:
+    LeaveCriticalSection(&g_TcpLock);
+    return fResult;
 }
 // ============ TCP TRANSPORT LAYER END ============
 
