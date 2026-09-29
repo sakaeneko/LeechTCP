@@ -5,11 +5,20 @@
 //
 #ifndef __LEECHRPC_H__
 #define __LEECHRPC_H__
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <windows.h>
+#include <ws2tcpip.h>
+#else
+typedef int SOCKET;
+#define INVALID_SOCKET (-1)
+#endif
+
 #include "leechcore.h"
 #include <leechgrpc.h>
 
 #ifdef _WIN32
-#include <windows.h>
 
 #define CLSID_BINDING_INTERFACE_LEECHRPC "906B0DC2-1337-0666-0001-0000657A63DD"
 
@@ -92,6 +101,8 @@ typedef struct LEECHRPC_GRPC {
 } LEECHRPC_GRPC, *PLEECHRPC_GRPC;
 
 typedef struct tdLEECHRPC_CLIENT_CONTEXT {
+    SOCKET hTcpSocket;              // TCP mode socket
+    BOOL fIsProtoTcp;               // TCP over plain socket
     BOOL fIsProtoRpc;               // RPC over TCP/IP.
     BOOL fIsProtoSmb;               // RPC over SMB (named pipe).
     BOOL fIsProtoGRpc;              // gRPC over TCP/IP.
