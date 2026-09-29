@@ -545,6 +545,7 @@ BOOL LeechRPC_TcpSubmitCommand(
     DWORD cbRsp = 0;
 
     if(ctx->hTcpSocket == INVALID_SOCKET) return FALSE;
+    lcprintf(ctxLC, "TCP submit: cbIn=%u\n", cbIn);
 
     if(!LeechRPC_TcpSendAll(ctx->hTcpSocket, &cbIn, sizeof(cbIn))) return FALSE;
     if(!LeechRPC_TcpSendAll(ctx->hTcpSocket, pbIn, cbIn)) return FALSE;
