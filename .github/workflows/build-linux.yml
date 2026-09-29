@@ -33,5 +33,6 @@ jobs:
         with:
           name: leechagent-linux
           path: |
-            leechagent_linux/leechagent
-            leechcore/leechcore.so
+            files/leechagent
+            files/leechcore.so
+            files/*.so
