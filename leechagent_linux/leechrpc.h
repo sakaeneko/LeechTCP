@@ -3,6 +3,10 @@
 // (c) Ulf Frisk, 2018-2026
 // Author: Ulf Frisk, pcileech@frizk.net
 //
+/*
+* TCP server thread (for tcp:// protocol support).
+*/
+VOID *LeechRpc_TcpServerThread(VOID *pv);
 #ifndef __LEECHRPC_H__
 #define __LEECHRPC_H__
 #include "leechcore.h"
