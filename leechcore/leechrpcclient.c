@@ -3,6 +3,11 @@
 // (c) Ulf Frisk, 2018-2026
 // Author: Ulf Frisk, pcileech@frizk.net
 //
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
+
 #include "leechcore.h"
 #include "leechcore_device.h"
 #include "leechcore_internal.h"
