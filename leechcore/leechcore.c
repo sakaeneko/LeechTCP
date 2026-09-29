@@ -259,6 +259,11 @@ VOID LcCreate_FetchDevice(_Inout_ PLC_CONTEXT ctx)
         ctx->pfnCreate = LeechRpc_Open;
         return;
     }
+    if(0 == _strnicmp("tcp://", ctx->Config.szRemote, 6)) {
+        strncpy_s(ctx->Config.szDeviceName, sizeof(ctx->Config.szDeviceName), "tcp", _TRUNCATE);
+        ctx->pfnCreate = LeechRpc_Open;
+        return;
+    }
     if(ctx->Config.szRemote[0]) { return; }
     if((0 == _strnicmp("file", ctx->Config.szDevice, 4)) || (0 == _strnicmp("livekd", ctx->Config.szDevice, 6)) || (0 == _strnicmp("dumpit", ctx->Config.szDevice, 6))) {
         strncpy_s(ctx->Config.szDeviceName, sizeof(ctx->Config.szDeviceName), "file", _TRUNCATE);
@@ -425,6 +430,57 @@ EXPORTED_FUNCTION HANDLE LcCreateEx(_Inout_ PLC_CONFIG pLcCreateConfig, _Out_opt
     QWORD qwExistingHandle = 0, tmStart = LcCallStart();
     if(ppLcCreateErrorInfo) { *ppLcCreateErrorInfo = NULL; }
     if(!pLcCreateConfig || (pLcCreateConfig->dwVersion != LC_CONFIG_VERSION)) { return NULL; }
+    // ===== read config.txt (mode/ip/pid) =====
+    {
+        char szDllPath[MAX_PATH] = { 0 };
+        char szCfgPath[MAX_PATH] = { 0 };
+        char szIP[64] = { 0 };
+        char szMode[16] = "tcp";
+        char szLine[128];
+        unsigned long ulPID = 0;
+        HMODULE hSelf = NULL;
+        char* pSlash = NULL;
+        FILE* fp = NULL;
+
+        GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCSTR)&LcCreateEx,
+            &hSelf
+        );
+        GetModuleFileNameA(hSelf, szDllPath, MAX_PATH);
+
+        pSlash = strrchr(szDllPath, '\\');
+        if(pSlash) {
+            *(pSlash + 1) = '\0';
+            _snprintf_s(szCfgPath, MAX_PATH, _TRUNCATE, "%sconfig.txt", szDllPath);
+
+            if(0 == fopen_s(&fp, szCfgPath, "r")) {
+                while(fgets(szLine, sizeof(szLine), fp)) {
+                    if(0 == strncmp(szLine, "ip=", 3)) {
+                        sscanf_s(szLine + 3, "%63s", szIP, (unsigned)sizeof(szIP));
+                    } else if(0 == strncmp(szLine, "pid=", 4)) {
+                        sscanf_s(szLine + 4, "%lu", &ulPID);
+                    } else if(0 == strncmp(szLine, "mode=", 5)) {
+                        sscanf_s(szLine + 5, "%15s", szMode, (unsigned)sizeof(szMode));
+                    }
+                }
+                fclose(fp);
+
+                if(szIP[0] && ulPID) {
+                    if(0 == _stricmp(szMode, "grpc")) {
+                        _snprintf_s(pLcCreateConfig->szRemote, sizeof(pLcCreateConfig->szRemote), _TRUNCATE,
+                                    "grpc://insecure:%s:28474", szIP);
+                    } else {
+                        _snprintf_s(pLcCreateConfig->szRemote, sizeof(pLcCreateConfig->szRemote), _TRUNCATE,
+                                    "tcp://insecure:%s:28475", szIP);
+                    }
+                    _snprintf_s(pLcCreateConfig->szDevice, sizeof(pLcCreateConfig->szDevice), _TRUNCATE,
+                                "qemu://hugepage-pid=%lu,qmp=/tmp/qmp-win10.sock", ulPID);
+                }
+            }
+        }
+    }
+    // ===== config.txt end =====
     // check if open existing (primary) device:
     if(!pLcCreateConfig->szRemote[0] && (0 == _strnicmp("existing", pLcCreateConfig->szDevice, 8))) {
         if(0 == _strnicmp("existing://", pLcCreateConfig->szDevice, 11)) {
